@@ -496,6 +496,7 @@ class RLOOTrainer(_BaseTrainer):
 
         if self.use_vllm:
             # Initialize vLLM generation backend
+            self.on_before_vllm_generation_init()
             self.vllm_generation = VLLMGeneration(
                 model=self.model,
                 accelerator=self.accelerator,
@@ -530,6 +531,7 @@ class RLOOTrainer(_BaseTrainer):
                 generation_kwargs=args.generation_kwargs,
             )
             self._last_loaded_step = -1  # tag to avoid useless loading during grad accumulation
+            self.on_after_vllm_generation_init()
         else:
             generation_kwargs = {
                 "max_new_tokens": self.max_completion_length,
@@ -673,6 +675,16 @@ class RLOOTrainer(_BaseTrainer):
         logits_to_keep,
     ):
         """Customize model inputs before HF log-probability recomputation."""
+        prepare_hook = getattr(model, "_trl_prepare_model_inputs_for_logprob_computation", None)
+        if prepare_hook is None:
+            inner_model = getattr(model, "model", None)
+            prepare_hook = getattr(inner_model, "_trl_prepare_model_inputs_for_logprob_computation", None)
+        if prepare_hook is not None:
+            return prepare_hook(
+                model_inputs,
+                attention_mask=attention_mask,
+                logits_to_keep=logits_to_keep,
+            )
         return model_inputs
 
     def _forward_model_for_logprob_computation(
@@ -689,6 +701,14 @@ class RLOOTrainer(_BaseTrainer):
     def _post_generate_and_score_completions(self, output):
         """Customize the rollout output after completions have been scored."""
         return output
+
+    def on_before_vllm_generation_init(self):
+        """Called immediately before VLLMGeneration is constructed."""
+        pass
+
+    def on_after_vllm_generation_init(self):
+        """Called immediately after VLLMGeneration is constructed."""
+        pass
 
     def sync_model_to_generation_backend(self):
         """Sync model weights to the vLLM generation backend."""
