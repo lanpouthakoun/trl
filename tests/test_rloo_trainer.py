@@ -36,6 +36,75 @@ if is_peft_available():
     from peft import LoraConfig, get_peft_model
 
 
+class TestRLOOLogprobHooks:
+    def test_logprob_hooks_can_customize_inputs_and_batching(self):
+        class HookedRLOOTrainer(RLOOTrainer):
+            def _prepare_model_inputs_for_logprob_computation(
+                self, model, model_inputs, *, attention_mask, logits_to_keep
+            ):
+                self.prepare_calls += 1
+                model_inputs["prepared_mask_sum"] = attention_mask.sum().item()
+                return model_inputs
+
+            def _forward_model_for_logprob_computation(self, model, model_inputs, *, attention_mask, logits_to_keep):
+                self.forward_calls += 1
+                assert "prepared_mask_sum" in model_inputs
+                batch_size, seq_len = model_inputs["input_ids"].shape
+                return torch.zeros(batch_size, seq_len, 11)
+
+        trainer = object.__new__(HookedRLOOTrainer)
+        trainer.args = None
+        trainer.temperature = 1.0
+        trainer.model_kwarg_keys = set()
+        trainer.prepare_calls = 0
+        trainer.forward_calls = 0
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        attention_mask = torch.ones_like(input_ids)
+        logps, entropies = HookedRLOOTrainer._get_per_token_logps_and_entropies(
+            trainer,
+            model=None,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            logits_to_keep=2,
+            batch_size=1,
+            compute_entropy=False,
+        )
+
+        assert logps.shape == (2, 2)
+        assert entropies is None
+        assert trainer.prepare_calls == 2
+        assert trainer.forward_calls == 2
+
+    def test_model_level_logprob_prep_hook_is_used_when_present(self):
+        class DummyModel:
+            def __init__(self):
+                self.calls = 0
+
+            def _trl_prepare_model_inputs_for_logprob_computation(
+                self, model_inputs, *, attention_mask, logits_to_keep
+            ):
+                self.calls += 1
+                prepared_inputs = dict(model_inputs)
+                prepared_inputs["prompt_mask"] = attention_mask[:, :-logits_to_keep]
+                return prepared_inputs
+
+        trainer = object.__new__(RLOOTrainer)
+        model = DummyModel()
+        attention_mask = torch.tensor([[1, 1, 1, 1]])
+
+        prepared_inputs = RLOOTrainer._prepare_model_inputs_for_logprob_computation(
+            trainer,
+            model,
+            {"input_ids": torch.tensor([[1, 2, 3, 4]])},
+            attention_mask=attention_mask,
+            logits_to_keep=2,
+        )
+
+        assert model.calls == 1
+        torch.testing.assert_close(prepared_inputs["prompt_mask"], torch.tensor([[1, 1]]))
+
+
 class TestRLOOTrainer(TrlTestCase):
     def test_init_minimal(self):
         # Test that RLOOTrainer can be instantiated with only model, reward_model and train_dataset

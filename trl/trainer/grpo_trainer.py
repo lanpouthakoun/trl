@@ -966,6 +966,12 @@ class GRPOTrainer(_BaseTrainer):
             # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
             model_inputs["logits_to_keep"] = logits_to_keep + 1
 
+        model_inputs = self._prepare_model_inputs_for_logprob_computation(
+            unwrapped_model.model,
+            model_inputs,
+            attention_mask=attention_mask,
+            logits_to_keep=logits_to_keep,
+        )
         model_inputs["use_cache"] = False  # only used in generation; set False to suppress warnings
 
         last_hidden_state = unwrapped_model.model(**model_inputs).last_hidden_state
@@ -1013,6 +1019,36 @@ class GRPOTrainer(_BaseTrainer):
         entropy_mask = masked_entropies >= entropy_threshold
         return entropy_mask & mask.bool()  # ensure padding tokens are always masked out
 
+    def _prepare_model_inputs_for_logprob_computation(
+        self,
+        model,
+        model_inputs,
+        *,
+        attention_mask,
+        logits_to_keep,
+    ):
+        """Customize model inputs before HF log-probability recomputation."""
+        return model_inputs
+
+    def _forward_model_for_logprob_computation(
+        self,
+        model,
+        model_inputs,
+        *,
+        attention_mask,
+        logits_to_keep,
+    ):
+        """Run the model forward used for HF log-probability recomputation."""
+        return model(**model_inputs).logits
+
+    def _post_generate_and_score_completions(self, output):
+        """Customize the rollout output after completions have been scored."""
+        return output
+
+    def sync_model_to_generation_backend(self):
+        """Sync model weights to the vLLM generation backend."""
+        self.vllm_generation.sync_weights()
+
     @profiling_decorator
     def _get_per_token_logps_and_entropies(
         self,
@@ -1033,7 +1069,7 @@ class GRPOTrainer(_BaseTrainer):
         image_position_ids=None,
     ) -> dict[str, torch.Tensor | None]:
         """Compute log-probs and (optionally) entropies for each token."""
-        batch_size = batch_size or input_ids.size(0)  # Chunk inputs into smaller batches to reduce memory peak
+        batch_size = batch_size or input_ids.size(0)
         all_logps = []
         all_entropies = []
         for start in range(0, input_ids.size(0), batch_size):
@@ -1085,9 +1121,20 @@ class GRPOTrainer(_BaseTrainer):
                 # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
                 model_inputs["logits_to_keep"] = logits_to_keep + 1
 
+            model_inputs = self._prepare_model_inputs_for_logprob_computation(
+                model,
+                model_inputs,
+                attention_mask=attention_mask_batch,
+                logits_to_keep=logits_to_keep,
+            )
             model_inputs["use_cache"] = False  # only used in generation; set False to suppress warnings
 
-            logits = model(**model_inputs).logits
+            logits = self._forward_model_for_logprob_computation(
+                model,
+                model_inputs,
+                attention_mask=attention_mask_batch,
+                logits_to_keep=logits_to_keep,
+            )
             # Exclude the last value: it corresponds to the next token pred
             logits = logits[:, :-1, :]  # (B, L-1, H)
             # Only keep the last logits_to_keep. For model that support logits_to_keep, this is a no-op.
@@ -1333,7 +1380,7 @@ class GRPOTrainer(_BaseTrainer):
             # Sync weights if training step changed
             if self.state.global_step != self._last_loaded_step:
                 with profiling_context(self, "sync_weights"):
-                    self.vllm_generation.sync_weights()
+                    self.sync_model_to_generation_backend()
                 self._last_loaded_step = self.state.global_step
 
             # Generate using vLLM with raw token IDs
@@ -1838,7 +1885,7 @@ class GRPOTrainer(_BaseTrainer):
             # Keep vLLM weights in sync for custom rollouts that rely on vLLM utilities.
             if self.use_vllm and self.state.global_step != self._last_loaded_step:
                 with profiling_context(self, "sync_weights"):
-                    self.vllm_generation.sync_weights()
+                    self.sync_model_to_generation_backend()
                 self._last_loaded_step = self.state.global_step
 
             # Pass prompts to rollout_func preserving structured messages.
@@ -2451,7 +2498,7 @@ class GRPOTrainer(_BaseTrainer):
             output["num_images"] = num_images
         if tool_mask is not None:
             output["tool_mask"] = tool_mask
-        return output
+        return self._post_generate_and_score_completions(output)
 
     def compute_liger_loss(self, unwrapped_model, inputs):
         # Compute the per-token log probabilities for the model

@@ -16,7 +16,6 @@ import gc
 import os
 import warnings
 from collections.abc import Callable
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -236,6 +235,89 @@ class TestGRPORolloutDispatch:
 
         with pytest.raises(ValueError, match="rollout_func must return keys"):
             trainer._generate(["prompt"])
+
+
+class TestGRPOLogprobHooks:
+    def test_logprob_hooks_can_customize_inputs_and_batching(self):
+        class HookedGRPOTrainer(GRPOTrainer):
+            def _prepare_model_inputs_for_logprob_computation(
+                self, model, model_inputs, *, attention_mask, logits_to_keep
+            ):
+                self.prepare_calls += 1
+                model_inputs["prepared_mask_sum"] = attention_mask.sum().item()
+                return model_inputs
+
+            def _forward_model_for_logprob_computation(self, model, model_inputs, *, attention_mask, logits_to_keep):
+                self.forward_calls += 1
+                assert "prepared_mask_sum" in model_inputs
+                batch_size, seq_len = model_inputs["input_ids"].shape
+                return torch.zeros(batch_size, seq_len, 11)
+
+        trainer = object.__new__(HookedGRPOTrainer)
+        trainer.args = None
+        trainer.temperature = 1.0
+        trainer.model_kwarg_keys = set()
+        trainer.prepare_calls = 0
+        trainer.forward_calls = 0
+
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        attention_mask = torch.ones_like(input_ids)
+        logps, entropies = HookedGRPOTrainer._get_per_token_logps_and_entropies(
+            trainer,
+            model=None,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            logits_to_keep=2,
+            batch_size=1,
+            compute_entropy=False,
+        )
+
+        assert logps.shape == (2, 2)
+        assert entropies is None
+        assert trainer.prepare_calls == 2
+        assert trainer.forward_calls == 2
+
+    def test_model_level_logprob_prep_hook_supports_reft_style_prompt_masks(self):
+        class DummyInnerModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.seen_prompt_mask = None
+
+            def _trl_prepare_model_inputs_for_logprob_computation(
+                self, model_inputs, *, attention_mask, logits_to_keep
+            ):
+                prepared_inputs = dict(model_inputs)
+                prepared_inputs["prompt_mask"] = attention_mask[:, :-logits_to_keep]
+                return prepared_inputs
+
+            def forward(self, input_ids, attention_mask, prompt_mask=None, use_cache=False):
+                self.seen_prompt_mask = prompt_mask
+                batch_size, seq_len = input_ids.shape
+                return type("DummyOutput", (), {"last_hidden_state": torch.zeros(batch_size, seq_len, 5)})()
+
+        class DummyWrappedModel:
+            def __init__(self):
+                self.model = DummyInnerModel()
+
+        trainer = object.__new__(GRPOTrainer)
+        trainer.model_kwarg_keys = set()
+        input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+        attention_mask = torch.tensor([[1, 1, 1, 1], [0, 1, 1, 1]])
+        wrapped_model = DummyWrappedModel()
+
+        hidden_states = GRPOTrainer._get_last_hidden_state(
+            trainer,
+            wrapped_model,
+            input_ids,
+            attention_mask,
+            logits_to_keep=2,
+        )
+
+        torch.testing.assert_close(
+            wrapped_model.model.seen_prompt_mask,
+            torch.tensor([[1, 1], [0, 1]]),
+        )
+        assert hidden_states.shape == (2, 2, 5)
 
 
 class TestGRPOTrainer(TrlTestCase):
