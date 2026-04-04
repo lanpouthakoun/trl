@@ -17,6 +17,7 @@
 import logging
 import math
 import os
+import re
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
@@ -366,12 +367,31 @@ class VLLMGeneration:
         # synchronize all processes after vLLM has been fully initialized.
         accelerator.wait_for_everyone()
 
-    def _fix_param_name_to_vllm(self, name: str, extra_prefixes: list[str] | None = None) -> str:
-        """Fix parameter name for vLLM compatibility."""
+    # Adapter-only parameter patterns introduced by ReFT IntervenableLayer.
+    # These have no vLLM counterpart and must be skipped during weight sync.
+    _REFT_ADAPTER_PARAM_RE = re.compile(
+        r"\.(adapter|attn_out_adapter|mlp_adapter"
+        r"|q_adapters|k_adapters|v_adapters|pre_adapter)\."
+    )
+
+    def _fix_param_name_to_vllm(self, name: str, extra_prefixes: list[str] | None = None) -> str | None:
+        """Fix parameter name for vLLM compatibility. Return None to skip the parameter.
+
+        For ReFT models (those with ``_intervention_config``), also strips the
+        ``.layer.`` nesting that ``IntervenableLayer`` introduces and skips
+        adapter-only parameters that have no vLLM counterpart.
+        """
         extra_prefixes = extra_prefixes or []
         prefixes = ["_checkpoint_wrapped_module."] + extra_prefixes
         for prefix in prefixes:
             name = name.replace(prefix, "")
+        if getattr(self.model, "_intervention_config", None) is not None:
+            if self._REFT_ADAPTER_PARAM_RE.search(name):
+                return None
+            # QKV case first: .layer.self_attn.attn. → .self_attn.
+            name = re.sub(r"(layers\.\d+)\.layer\.self_attn\.attn\.", r"\1.self_attn.", name)
+            # General case: .layer. → .
+            name = re.sub(r"(layers\.\d+)\.layer\.", r"\1.", name)
         return name
 
     def _sync_fsdp1_params_to_vllm(self, module: nn.Module, prefix: str = "", visited: set[str] | None = None):
@@ -392,6 +412,8 @@ class VLLMGeneration:
                 for param_name, param in module.named_parameters():
                     full_name = f"{prefix}.{param_name}" if prefix else param_name
                     full_name = self._fix_param_name_to_vllm(full_name, extra_prefixes=["_fsdp_wrapped_module."])
+                    if full_name is None:
+                        continue
 
                     if full_name in visited:
                         continue  # skip FSDP subtrees already traversed
@@ -418,6 +440,8 @@ class VLLMGeneration:
             if "original_module" in name:
                 continue
             name = self._fix_param_name_to_vllm(name, extra_prefixes=["modules_to_save.default."])
+            if name is None:
+                continue
 
             if param.is_cpu:
                 param = param.to(torch.device("cuda"))
@@ -505,6 +529,8 @@ class VLLMGeneration:
             else:
                 for name, param in model.named_parameters():
                     name = self._fix_param_name_to_vllm(name)
+                    if name is None:
+                        continue
                     with gather_if_zero3([param]):
                         if self.mode == "server" and accelerator.is_main_process:
                             self.vllm_client.update_named_param(name, param.data)
