@@ -367,28 +367,23 @@ class VLLMGeneration:
         # synchronize all processes after vLLM has been fully initialized.
         accelerator.wait_for_everyone()
 
-    # Adapter-only parameter patterns introduced by ReFT IntervenableLayer.
-    # These have no vLLM counterpart and must be skipped during weight sync.
-    _REFT_ADAPTER_PARAM_RE = re.compile(
-        r"\.(adapter|attn_out_adapter|mlp_adapter"
-        r"|q_adapters|k_adapters|v_adapters|pre_adapter)\."
-    )
-
     def _fix_param_name_to_vllm(self, name: str, extra_prefixes: list[str] | None = None) -> str | None:
         """Fix parameter name for vLLM compatibility. Return None to skip the parameter.
 
-        For ReFT models (those with ``_intervention_config``), also strips the
-        ``.layer.`` nesting that ``IntervenableLayer`` introduces and skips
-        adapter-only parameters that have no vLLM counterpart.
+        For ReFT models (those with ``_intervention_config``), remaps the
+        ``.layer.`` nesting that ``IntervenableLayer`` introduces:
+          - Adapter params: ``.layer.adapter.`` → ``.reft_adapter.``
+          - QKV base weights: ``.layer.self_attn.attn.`` → ``.self_attn.``
+          - Other base weights: ``.layer.`` → ``.``
         """
         extra_prefixes = extra_prefixes or []
         prefixes = ["_checkpoint_wrapped_module."] + extra_prefixes
         for prefix in prefixes:
             name = name.replace(prefix, "")
         if getattr(self.model, "_intervention_config", None) is not None:
-            if self._REFT_ADAPTER_PARAM_RE.search(name):
-                return None
-            # QKV case first: .layer.self_attn.attn. → .self_attn.
+            # Adapter params: .layer.adapter. → .reft_adapter.
+            name = re.sub(r"(layers\.\d+)\.layer\.adapter\.", r"\1.reft_adapter.", name)
+            # QKV case: .layer.self_attn.attn. → .self_attn.
             name = re.sub(r"(layers\.\d+)\.layer\.self_attn\.attn\.", r"\1.self_attn.", name)
             # General case: .layer. → .
             name = re.sub(r"(layers\.\d+)\.layer\.", r"\1.", name)
@@ -543,6 +538,14 @@ class VLLMGeneration:
             self.vllm_client.reset_prefix_cache()
         elif self.mode == "colocate":
             self.llm.reset_prefix_cache()
+
+        # Refresh derived ReFT caches (e.g. _R_cache, _w2_pinv_cache)
+        # after adapter weights have been updated.
+        if getattr(self.model, "_intervention_config", None) is not None:
+            if self.mode == "server" and accelerator.is_main_process:
+                self.vllm_client.refresh_reft_caches()
+            elif self.mode == "colocate":
+                self.llm.collective_rpc("refresh_reft_caches")
 
     def generate(
         self,

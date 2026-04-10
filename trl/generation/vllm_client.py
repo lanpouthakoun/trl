@@ -532,6 +532,15 @@ class VLLMClient:
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
+    def refresh_reft_caches(self):
+        """
+        Recompute derived ReFT adapter caches on the server after weight sync.
+        """
+        url = f"{self.base_url}/refresh_reft_caches/"
+        response = self.session.post(url)
+        if response.status_code != 200:
+            raise Exception(f"Request failed: {response.status_code}, {response.text}")
+
     def close_communicator(self):
         """
         Closes the weight update group and cleans up the communication group.

@@ -305,6 +305,14 @@ class ScriptArguments:
             "model implementation."
         },
     )
+    reft_spec_file: str | None = field(
+        default=None,
+        metadata={
+            "help": "Path to a ReFT spec file (created by vllm.reft.set_reft_spec). When provided, the server "
+            "constructs ReFT-aware decoder layers so adapter weights can be synced via the standard "
+            "update_named_param path."
+        },
+    )
 
 
 def llm_worker(
@@ -317,6 +325,11 @@ def llm_worker(
     os.environ["VLLM_DP_RANK_LOCAL"] = str(data_parallel_rank)
     os.environ["VLLM_DP_SIZE"] = str(script_args.data_parallel_size)
     os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
+
+    # If a ReFT spec file is provided, set the env var so the model
+    # constructor builds ReFT-aware decoder layers.
+    if script_args.reft_spec_file is not None:
+        os.environ["_VLLM_REFT_SPEC_FILE"] = script_args.reft_spec_file
 
     llm = LLM(
         model=script_args.model,
@@ -855,6 +868,16 @@ def main(script_args: ScriptArguments):
         all_outputs = [connection.recv() for connection in connections]
         success = all(output for output in all_outputs)
         return {"message": "Request received, resetting prefix cache status: " + str(success)}
+
+    @app.post("/refresh_reft_caches/")
+    async def refresh_reft_caches():
+        """
+        Recompute derived ReFT adapter caches after weights have been updated.
+        """
+        kwargs = {"method": "refresh_reft_caches"}
+        for connection in connections:
+            connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
+        return {"message": "Request received, refreshing ReFT caches"}
 
     @app.post("/close_communicator/")
     async def close_communicator():
