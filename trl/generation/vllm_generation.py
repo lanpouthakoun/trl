@@ -377,15 +377,17 @@ class VLLMGeneration:
           - Other base weights: ``.layer.`` → ``.``
         """
         extra_prefixes = extra_prefixes or []
-        prefixes = ["_checkpoint_wrapped_module."] + extra_prefixes
+        prefixes = ["_checkpoint_wrapped_module.", "base_model."] + extra_prefixes
         for prefix in prefixes:
             name = name.replace(prefix, "")
-        if getattr(self.model, "_intervention_config", None) is not None:
-            # Adapter params: .layer.adapter. → .reft_adapter.
-            name = re.sub(r"(layers\.\d+)\.layer\.adapter\.", r"\1.reft_adapter.", name)
+        # Unwrap accelerator wrapper to check for ReFT intervention config
+        model = getattr(self.model, "module", self.model)
+        if getattr(model, "_intervention_config", None) is not None:
+            # Adapter params: .adapter. → .reft_adapter.  (sibling of .layer.)
+            name = re.sub(r"(layers\.\d+)\.adapter\.", r"\1.reft_adapter.", name)
             # QKV case: .layer.self_attn.attn. → .self_attn.
             name = re.sub(r"(layers\.\d+)\.layer\.self_attn\.attn\.", r"\1.self_attn.", name)
-            # General case: .layer. → .
+            # General case: .layer. → .  (unwrap IntervenableLayer)
             name = re.sub(r"(layers\.\d+)\.layer\.", r"\1.", name)
         return name
 
@@ -541,7 +543,8 @@ class VLLMGeneration:
 
         # Refresh derived ReFT caches (e.g. _R_cache, _w2_pinv_cache)
         # after adapter weights have been updated.
-        if getattr(self.model, "_intervention_config", None) is not None:
+        model = getattr(self.model, "module", self.model)
+        if getattr(model, "_intervention_config", None) is not None:
             if self.mode == "server" and accelerator.is_main_process:
                 self.vllm_client.refresh_reft_caches()
             elif self.mode == "colocate":
