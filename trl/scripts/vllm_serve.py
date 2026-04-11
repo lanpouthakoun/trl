@@ -33,12 +33,35 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 def _set_named_tensor(model, name: str, value) -> None:
     """Set a tensor (parameter or buffer) on *model* by its dotted name, in-place."""
+    import sys
     import torch
     parts = name.split(".")
     module = model
     for part in parts[:-1]:
+        if not hasattr(module, part):
+            print(
+                f"[_set_named_tensor] FAILED: {name} — "
+                f"module {type(module).__name__} has no attr '{part}'",
+                file=sys.stderr, flush=True,
+            )
+            return
         module = getattr(module, part)
-    target = getattr(module, parts[-1])
+    attr = parts[-1]
+    if not hasattr(module, attr):
+        print(
+            f"[_set_named_tensor] FAILED: {name} — "
+            f"module {type(module).__name__} has no attr '{attr}'",
+            file=sys.stderr, flush=True,
+        )
+        return
+    target = getattr(module, attr)
+    if target.shape != value.shape:
+        print(
+            f"[_set_named_tensor] SHAPE MISMATCH: {name} — "
+            f"target={list(target.shape)} value={list(value.shape)}",
+            file=sys.stderr, flush=True,
+        )
+        return
     with torch.no_grad():
         target.copy_(value)
 
@@ -155,10 +178,10 @@ class WeightSyncWorkerExtension:
             self.communicator.broadcast(weight, src=self.client_rank)
             self.communicator.group.barrier()
 
-        # Load the received weights into the model.  ReFT adapter weights
-        # (reft_adapter.*) and parametrization buffers aren't reachable via
-        # load_weights (which only handles known architecture weight names),
-        # so we fall back to direct tensor copy for those.
+        # ReFT adapter weights and parametrization buffers aren't in vLLM's
+        # weight map, so load_weights silently drops them. Route them through
+        # direct tensor copy instead. (LoRA doesn't hit this path — it merges
+        # into base weights before sync.)
         if "reft_adapter." in name or "parametrizations." in name:
             _set_named_tensor(self.model_runner.model, name, weight)
         else:
