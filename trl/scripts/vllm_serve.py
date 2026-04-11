@@ -31,6 +31,16 @@ from multiprocessing.connection import Connection
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
+def _set_named_tensor(model, name: str, value) -> None:
+    """Set a tensor (parameter or buffer) on *model* by its dotted name, in-place."""
+    parts = name.split(".")
+    module = model
+    for part in parts[:-1]:
+        module = getattr(module, part)
+    target = getattr(module, parts[-1])
+    target.copy_(value)
+
+
 class WeightSyncWorkerExtension:
     """
     A vLLM worker extension that enables weight synchronization between a client and multiple server workers.
@@ -143,8 +153,13 @@ class WeightSyncWorkerExtension:
             self.communicator.broadcast(weight, src=self.client_rank)
             self.communicator.group.barrier()
 
-        # Load the received weights into the model.
-        self.model_runner.model.load_weights(weights=[(name, weight)])
+        # Load the received weights into the model.  Buffers (e.g. the
+        # orthogonal parametrization's ``base``) aren't reachable via
+        # load_weights, so we fall back to direct tensor copy.
+        if "parametrizations." in name:
+            _set_named_tensor(self.model_runner.model, name, weight)
+        else:
+            self.model_runner.model.load_weights(weights=[(name, weight)])
 
     def close_communicator(self) -> None:
         """
@@ -305,14 +320,66 @@ class ScriptArguments:
             "model implementation."
         },
     )
-    reft_spec_file: str | None = field(
+    reft_config: str | None = field(
         default=None,
         metadata={
-            "help": "Path to a ReFT spec file (created by vllm.reft.set_reft_spec). When provided, the server "
-            "constructs ReFT-aware decoder layers so adapter weights can be synced via the standard "
-            "update_named_param path."
+            "help": "Path to a ReFT config JSON (pyreft ReftConfig / adaptors InterventionConfig). When provided, "
+            "the server auto-detects model dimensions and constructs ReFT-aware decoder layers so adapter "
+            "weights can be synced via the standard update_named_param path."
         },
     )
+
+
+def _setup_reft_spec(model_name: str, reft_config_path: str) -> bool:
+    """Construct a ReFT spec from a config JSON and set it for model construction.
+
+    Auto-detects hidden_size and num_layers from the model config.  The actual
+    adapter weights don't matter here — they'll be overwritten on the first
+    ``sync_weights`` call from the trainer (including buffers like ``base``).
+
+    Returns True if the spec was set successfully.
+    """
+    import json
+    import torch
+    from transformers import AutoConfig
+
+    try:
+        from pyreft import ADAPTER_REGISTRY
+    except ImportError:
+        from adaptors import ADAPTER_REGISTRY
+
+    with open(reft_config_path) as f:
+        cfg = json.load(f)
+
+    model_config = AutoConfig.from_pretrained(model_name)
+    hidden_size = cfg.get("hidden_size") or model_config.hidden_size
+    num_layers = model_config.num_hidden_layers
+
+    # Resolve layer indices
+    layer_indices = cfg.get("layer_indices", list(range(num_layers)))
+    if layer_indices == "all":
+        layer_indices = list(range(num_layers))
+
+    adapter_type = cfg.get("adapter_type") or cfg.get("mode", "loreft")
+    adapter_cls = ADAPTER_REGISTRY.get(adapter_type)
+    if adapter_cls is None:
+        raise ValueError(f"Unknown adapter type {adapter_type!r}. Available: {list(ADAPTER_REGISTRY)}")
+
+    sample_adapter = adapter_cls(
+        hidden_size=hidden_size,
+        low_rank_dim=cfg.get("low_rank_dim", 64),
+        position=cfg.get("position", "last"),
+        device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    from vllm.reft import set_reft_spec
+    set_reft_spec({
+        "layer_indices": layer_indices,
+        "position": cfg.get("position", "last"),
+        "sample_adapter": sample_adapter,
+    })
+    return True
 
 
 def llm_worker(
@@ -326,10 +393,12 @@ def llm_worker(
     os.environ["VLLM_DP_SIZE"] = str(script_args.data_parallel_size)
     os.environ["VLLM_DP_MASTER_PORT"] = str(master_port)
 
-    # If a ReFT spec file is provided, set the env var so the model
-    # constructor builds ReFT-aware decoder layers.
-    if script_args.reft_spec_file is not None:
-        os.environ["_VLLM_REFT_SPEC_FILE"] = script_args.reft_spec_file
+    # If a ReFT config is provided, construct a spec so the model
+    # constructor builds ReFT-aware decoder layers.  The server auto-detects
+    # hidden_size and num_layers from the model config.
+    _reft_active = False
+    if script_args.reft_config is not None:
+        _reft_active = _setup_reft_spec(script_args.model, script_args.reft_config)
 
     llm = LLM(
         model=script_args.model,
@@ -350,6 +419,11 @@ def llm_worker(
         # Important so temperature scaling/logit tweaking affects the TIS log probs
         logprobs_mode="processed_logprobs",
     )
+
+    # Clear the ReFT spec now that the model is constructed.
+    if _reft_active:
+        from vllm.reft import clear_reft_spec
+        clear_reft_spec()
 
     # Send ready signal to parent process
     connection.send({"status": "ready"})

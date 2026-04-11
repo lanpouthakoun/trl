@@ -535,6 +535,23 @@ class VLLMGeneration:
                             llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                             llm_model.load_weights([(name, param.data)])
 
+        # In server mode, sync adapter buffers (e.g. the orthogonal
+        # parametrization's ``base`` buffer).  named_parameters() only returns
+        # trainable params; buffers like ``base`` must also be sent so the
+        # server's R = f(original, base) matches the trainer's.
+        # In colocate mode this is unnecessary — adapters are deepcopied with
+        # the correct buffers at construction time.
+        unwrapped = getattr(self.model, "module", self.model)
+        if self.mode == "server" and accelerator.is_main_process:
+            if getattr(unwrapped, "_intervention_config", None) is not None:
+                for name, buf in unwrapped.named_buffers():
+                    if "parametrizations." not in name:
+                        continue
+                    vllm_name = self._fix_param_name_to_vllm(name)
+                    if vllm_name is None:
+                        continue
+                    self.vllm_client.update_named_param(vllm_name, buf.data)
+
         # Reset cache on vLLM
         if self.mode == "server" and accelerator.is_main_process:
             self.vllm_client.reset_prefix_cache()
@@ -543,8 +560,7 @@ class VLLMGeneration:
 
         # Refresh derived ReFT caches (e.g. _R_cache, _w2_pinv_cache)
         # after adapter weights have been updated.
-        model = getattr(self.model, "module", self.model)
-        if getattr(model, "_intervention_config", None) is not None:
+        if getattr(unwrapped, "_intervention_config", None) is not None:
             if self.mode == "server" and accelerator.is_main_process:
                 self.vllm_client.refresh_reft_caches()
             elif self.mode == "colocate":
