@@ -982,18 +982,6 @@ def main(script_args: ScriptArguments):
         all_outputs = [connection.recv() for connection in connections]
         return {"message": "ReFT caches refreshed"}
 
-    @app.post("/get_reft_adapter_fingerprints/")
-    async def get_reft_adapter_fingerprints():
-        """Return fingerprints of all adapter params/buffers for post-sync verification."""
-        kwargs = {"method": "get_reft_adapter_fingerprints"}
-        for connection in connections:
-            connection.send({"type": "call", "method": "collective_rpc", "kwargs": kwargs})
-        all_outputs = [connection.recv() for connection in connections]
-        # collective_rpc returns list[result_per_tp_worker]; unwrap both layers
-        if all_outputs and all_outputs[0]:
-            return all_outputs[0][0]
-        return {}
-
     @app.post("/close_communicator/")
     async def close_communicator():
         """
