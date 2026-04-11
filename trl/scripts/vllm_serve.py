@@ -33,12 +33,14 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 def _set_named_tensor(model, name: str, value) -> None:
     """Set a tensor (parameter or buffer) on *model* by its dotted name, in-place."""
+    import torch
     parts = name.split(".")
     module = model
     for part in parts[:-1]:
         module = getattr(module, part)
     target = getattr(module, parts[-1])
-    target.copy_(value)
+    with torch.no_grad():
+        target.copy_(value)
 
 
 class WeightSyncWorkerExtension:
