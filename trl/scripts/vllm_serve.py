@@ -155,10 +155,11 @@ class WeightSyncWorkerExtension:
             self.communicator.broadcast(weight, src=self.client_rank)
             self.communicator.group.barrier()
 
-        # Load the received weights into the model.  Buffers (e.g. the
-        # orthogonal parametrization's ``base``) aren't reachable via
-        # load_weights, so we fall back to direct tensor copy.
-        if "parametrizations." in name:
+        # Load the received weights into the model.  ReFT adapter weights
+        # (reft_adapter.*) and parametrization buffers aren't reachable via
+        # load_weights (which only handles known architecture weight names),
+        # so we fall back to direct tensor copy for those.
+        if "reft_adapter." in name or "parametrizations." in name:
             _set_named_tensor(self.model_runner.model, name, weight)
         else:
             self.model_runner.model.load_weights(weights=[(name, weight)])
