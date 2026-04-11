@@ -62,8 +62,25 @@ def _set_named_tensor(model, name: str, value) -> None:
             file=sys.stderr, flush=True,
         )
         return
+    # Log parametrization buffer syncs — these are the most failure-prone
+    if "parametrizations." in name:
+        before = target.data.flatten()[:4].tolist()
+        incoming = value.data.flatten()[:4].tolist()
+        print(
+            f"[_set_named_tensor] BUFFER SYNC: {name}\n"
+            f"  target_shape={list(target.shape)} value_shape={list(value.shape)}\n"
+            f"  before={[f'{v:.6f}' for v in before]}\n"
+            f"  incoming={[f'{v:.6f}' for v in incoming]}",
+            file=sys.stderr, flush=True,
+        )
     with torch.no_grad():
         target.copy_(value)
+    if "parametrizations." in name:
+        after = target.data.flatten()[:4].tolist()
+        print(
+            f"  after_copy={[f'{v:.6f}' for v in after]}",
+            file=sys.stderr, flush=True,
+        )
 
 
 class WeightSyncWorkerExtension:
@@ -981,6 +998,18 @@ def main(script_args: ScriptArguments):
         # so the caller knows caches are up-to-date before generating.
         all_outputs = [connection.recv() for connection in connections]
         return {"message": "ReFT caches refreshed"}
+
+    @app.post("/get_reft_weight_fingerprints/")
+    async def get_reft_weight_fingerprints():
+        """Return adapter param/buffer fingerprints for diagnostic verification."""
+        kwargs = {"method": "get_reft_weight_fingerprints"}
+        for connection in connections:
+            connection.send({"type": "call", "method": "collective_rpc", "kwargs": kwargs})
+        all_outputs = [connection.recv() for connection in connections]
+        # collective_rpc returns list[result_per_tp_worker]; unwrap
+        if all_outputs and all_outputs[0]:
+            return all_outputs[0][0]
+        return {}
 
     @app.post("/close_communicator/")
     async def close_communicator():
