@@ -431,9 +431,9 @@ def main(script_args: ScriptArguments):
     from vllm import SamplingParams
     from vllm.sampling_params import StructuredOutputsParams
 
-    if Version(vllm.__version__) <= Version("0.11.0"):
+    try:
         from vllm.utils import get_open_port
-    else:
+    except ImportError:
         from vllm.utils.network_utils import get_open_port
 
     if is_vision_available():
