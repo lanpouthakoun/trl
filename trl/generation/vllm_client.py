@@ -541,6 +541,14 @@ class VLLMClient:
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
+    def get_reft_adapter_fingerprints(self) -> dict:
+        """Query the server for adapter param/buffer fingerprints (for sync verification)."""
+        url = f"{self.base_url}/get_reft_adapter_fingerprints/"
+        response = self.session.post(url)
+        if response.status_code != 200:
+            raise Exception(f"Request failed: {response.status_code}, {response.text}")
+        return response.json()
+
     def close_communicator(self):
         """
         Closes the weight update group and cleans up the communication group.
