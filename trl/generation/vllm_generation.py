@@ -573,12 +573,15 @@ class VLLMGeneration:
                         continue
                     _buf_count += 1
                     if any(f"layers.{i}." in name for i in (0, 12, 23)):
-                        logger.info(
-                            "[ReFT TRAIN buffer] %s → %s  first4=%s",
-                            name, vllm_name, buf.data.flatten()[:4].tolist(),
+                        flat = buf.data.flatten()[:4].tolist()
+                        print(
+                            f"[ReFT TRAIN buffer] {name} → {vllm_name}  "
+                            f"first4={[f'{v:.6f}' for v in flat]}  "
+                            f"shape={list(buf.shape)} dtype={buf.dtype}",
+                            flush=True,
                         )
                     self.vllm_client.update_named_param(vllm_name, buf.data)
-                logger.info("SYNC BUFFERS: %d parametrization buffers sent", _buf_count)
+                print(f"SYNC BUFFERS: {_buf_count} parametrization buffers sent", flush=True)
 
         # Reset cache on vLLM
         if self.mode == "server" and accelerator.is_main_process:
