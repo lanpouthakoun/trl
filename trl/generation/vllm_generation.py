@@ -531,6 +531,8 @@ class VLLMGeneration:
                 _sync_count = 0
                 _adapter_count = 0
                 for name, param in model.named_parameters():
+                    if not param.requires_grad:
+                        continue
                     name = self._fix_param_name_to_vllm(name)
                     if name is None:
                         continue
@@ -572,17 +574,11 @@ class VLLMGeneration:
                     if vllm_name is None:
                         continue
                     _buf_count += 1
-                    flat = buf.data.flatten()[:4].tolist()
-                    buf_to_send = buf.data.contiguous()
-                    print(
-                        f"[ReFT TRAIN buffer #{_buf_count}] {name} → {vllm_name}  "
-                        f"first4={[f'{v:.6f}' for v in flat]}  "
-                        f"shape={list(buf.shape)} dtype={buf.dtype} device={buf.device} "
-                        f"contig={buf.data.is_contiguous()} stride={buf.data.stride()}",
-                        flush=True,
-                    )
-                    self.vllm_client.update_named_param(vllm_name, buf_to_send)
-                print(f"SYNC BUFFERS: {_buf_count} parametrization buffers sent", flush=True)
+                    # Parametrization buffers (e.g. orthogonal base) may be
+                    # stored as transposed views.  NCCL ignores strides and
+                    # reads raw memory, so we must make a contiguous copy.
+                    self.vllm_client.update_named_param(vllm_name, buf.data.contiguous())
+                logger.info("SYNC BUFFERS: %d parametrization buffers sent", _buf_count)
 
         # Reset cache on vLLM
         if self.mode == "server" and accelerator.is_main_process:
