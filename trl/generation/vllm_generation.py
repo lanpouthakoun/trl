@@ -339,10 +339,6 @@ class VLLMGeneration:
                     elif isinstance(module, bnb.nn.Linear8bitLt):
                         raise ValueError("vLLM does not support in-flight 8-bit quantization.")
 
-            # Disable v1 multiprocessing so sync_weights can access the model
-            # directly via model_executor for colocate weight sync.
-            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
             # Build LLM initialization kwargs
             self.llm = LLM(
                 model=model.name_or_path,
