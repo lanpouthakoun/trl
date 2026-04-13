@@ -1032,7 +1032,7 @@ class GRPOTrainer(_BaseTrainer):
         """Customize model inputs before HF log-probability recomputation."""
         prepare_hook = getattr(model, "_trl_prepare_model_inputs_for_logprob_computation", None)
         if prepare_hook is None:
-            inner_model = getattr(model, "model", None)
+            inner_model = getattr(model, "module", getattr(model, "model", None))
             prepare_hook = getattr(inner_model, "_trl_prepare_model_inputs_for_logprob_computation", None)
         if prepare_hook is not None:
             return prepare_hook(
