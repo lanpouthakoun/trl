@@ -539,14 +539,11 @@ class VLLMGeneration:
                     _sync_count += 1
                     if "reft_adapter." in name or "parametrizations." in name:
                         _adapter_count += 1
-                        # Print fingerprints for sample layers to compare with vLLM side
-                        if any(f"layers.{i}." in name for i in (0, 12, 23)):
+                        if logger.isEnabledFor(logging.DEBUG) and any(f"layers.{i}." in name for i in (0, 12, 23)):
                             flat = param.data.flatten()[:4].tolist()
-                            logger.info(
-                                "[ReFT TRAIN params] %s  requires_grad=%s  "
-                                "first4=%s  shape=%s dtype=%s",
-                                name, param.requires_grad,
-                                [f"{v:.6f}" for v in flat],
+                            logger.debug(
+                                "[ReFT TRAIN params] %s  first4=%s  shape=%s dtype=%s",
+                                name, [f"{v:.6f}" for v in flat],
                                 list(param.shape), param.dtype,
                             )
                     with gather_if_zero3([param]):
@@ -555,7 +552,7 @@ class VLLMGeneration:
                         elif self.mode == "colocate":
                             llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
                             llm_model.load_weights([(name, param.data)])
-                logger.info("SYNC TOTAL: %d params (%d adapter)", _sync_count, _adapter_count)
+                logger.debug("SYNC TOTAL: %d params (%d adapter)", _sync_count, _adapter_count)
 
         # In server mode, sync adapter buffers (e.g. the orthogonal
         # parametrization's ``base`` buffer).  named_parameters() only returns
@@ -578,7 +575,7 @@ class VLLMGeneration:
                     # stored as transposed views.  NCCL ignores strides and
                     # reads raw memory, so we must make a contiguous copy.
                     self.vllm_client.update_named_param(vllm_name, buf.data.contiguous())
-                logger.info("SYNC BUFFERS: %d parametrization buffers sent", _buf_count)
+                logger.debug("SYNC BUFFERS: %d parametrization buffers sent", _buf_count)
 
         # Reset cache on vLLM
         if self.mode == "server" and accelerator.is_main_process:

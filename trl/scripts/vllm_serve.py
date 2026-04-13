@@ -30,57 +30,40 @@ from multiprocessing.connection import Connection
 # the 'spawn' start method
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+_reft_logger = logging.getLogger("vllm.reft")
+
 
 def _set_named_tensor(model, name: str, value) -> None:
     """Set a tensor (parameter or buffer) on *model* by its dotted name, in-place."""
-    import sys
     import torch
     parts = name.split(".")
     module = model
     for part in parts[:-1]:
         if not hasattr(module, part):
-            print(
-                f"[_set_named_tensor] FAILED: {name} — "
-                f"module {type(module).__name__} has no attr '{part}'",
-                file=sys.stderr, flush=True,
-            )
+            _reft_logger.warning("_set_named_tensor FAILED: %s — module %s has no attr '%s'",
+                                 name, type(module).__name__, part)
             return
         module = getattr(module, part)
     attr = parts[-1]
     if not hasattr(module, attr):
-        print(
-            f"[_set_named_tensor] FAILED: {name} — "
-            f"module {type(module).__name__} has no attr '{attr}'",
-            file=sys.stderr, flush=True,
-        )
+        _reft_logger.warning("_set_named_tensor FAILED: %s — module %s has no attr '%s'",
+                             name, type(module).__name__, attr)
         return
     target = getattr(module, attr)
     if target.shape != value.shape:
-        print(
-            f"[_set_named_tensor] SHAPE MISMATCH: {name} — "
-            f"target={list(target.shape)} value={list(value.shape)}",
-            file=sys.stderr, flush=True,
-        )
+        _reft_logger.warning("_set_named_tensor SHAPE MISMATCH: %s — target=%s value=%s",
+                             name, list(target.shape), list(value.shape))
         return
-    # Log parametrization buffer syncs — these are the most failure-prone
-    if "parametrizations." in name:
+    if "parametrizations." in name and _reft_logger.isEnabledFor(logging.DEBUG):
         before = target.data.flatten()[:4].tolist()
         incoming = value.data.flatten()[:4].tolist()
-        print(
-            f"[_set_named_tensor] BUFFER SYNC: {name}\n"
-            f"  target_shape={list(target.shape)} value_shape={list(value.shape)}\n"
-            f"  before={[f'{v:.6f}' for v in before]}\n"
-            f"  incoming={[f'{v:.6f}' for v in incoming]}",
-            file=sys.stderr, flush=True,
-        )
+        _reft_logger.debug("BUFFER SYNC: %s before=%s incoming=%s",
+                           name, [f'{v:.6f}' for v in before], [f'{v:.6f}' for v in incoming])
     with torch.no_grad():
         target.copy_(value)
-    if "parametrizations." in name:
+    if "parametrizations." in name and _reft_logger.isEnabledFor(logging.DEBUG):
         after = target.data.flatten()[:4].tolist()
-        print(
-            f"  after_copy={[f'{v:.6f}' for v in after]}",
-            file=sys.stderr, flush=True,
-        )
+        _reft_logger.debug("  after_copy=%s", [f'{v:.6f}' for v in after])
 
 
 class WeightSyncWorkerExtension:
