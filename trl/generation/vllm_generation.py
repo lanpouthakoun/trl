@@ -339,6 +339,10 @@ class VLLMGeneration:
                     elif isinstance(module, bnb.nn.Linear8bitLt):
                         raise ValueError("vLLM does not support in-flight 8-bit quantization.")
 
+            # Disable v1 multiprocessing so sync_weights can access the model
+            # directly via model_executor for colocate weight sync.
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
             # Build LLM initialization kwargs
             self.llm = LLM(
                 model=model.name_or_path,
@@ -366,14 +370,6 @@ class VLLMGeneration:
         # desynchronization and seems to lead to DeepSpeed hanging during initialization. To prevent this, we
         # synchronize all processes after vLLM has been fully initialized.
         accelerator.wait_for_everyone()
-
-    def _colocate_load_weights(self, weights: list[tuple[str, "torch.Tensor"]]):
-        """Load weights into the colocated vLLM model."""
-        try:
-            llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-            llm_model.load_weights(weights)
-        except AttributeError:
-            self.llm.apply_model(lambda m: m.load_weights(weights))
 
     def _fix_param_name_to_vllm(self, name: str, extra_prefixes: list[str] | None = None) -> str | None:
         """Fix parameter name for vLLM compatibility. Return None to skip the parameter.
@@ -427,7 +423,8 @@ class VLLMGeneration:
                     if self.mode == "server" and accelerator.is_main_process:
                         self.vllm_client.update_named_param(full_name, param.data)
                     elif self.mode == "colocate":
-                        self._colocate_load_weights([(full_name, param.data)])
+                        llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                        llm_model.load_weights([(full_name, param.data)])
 
     def _sync_fsdp2_params_to_vllm(self, module: nn.Module):
         """FSDP2-specific parameter synchronization."""
@@ -454,7 +451,8 @@ class VLLMGeneration:
             if self.mode == "server" and accelerator.is_main_process:
                 self.vllm_client.update_named_param(name, param)
             elif self.mode == "colocate":
-                self._colocate_load_weights([(name, param)])
+                llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                llm_model.load_weights([(name, param)])
 
     def sync_weights(self):
         """Synchronize model weights to vLLM.
@@ -519,7 +517,8 @@ class VLLMGeneration:
                         if self.mode == "server" and accelerator.is_main_process:
                             self.vllm_client.update_named_param(name, param.data)
                         elif self.mode == "colocate":
-                            self._colocate_load_weights([(name, param.data)])
+                            llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                            llm_model.load_weights([(name, param.data)])
                 # Unmerge adapters while parameters are still gathered
                 model.unmerge_adapter()
                 # Parameters will automatically be repartitioned when exiting the context
@@ -555,7 +554,8 @@ class VLLMGeneration:
                         if self.mode == "server" and accelerator.is_main_process:
                             self.vllm_client.update_named_param(name, param.data)
                         elif self.mode == "colocate":
-                            self._colocate_load_weights([(name, param.data)])
+                            llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                            llm_model.load_weights([(name, param.data)])
                 logger.debug("SYNC TOTAL: %d params (%d adapter)", _sync_count, _adapter_count)
 
         # In server mode, sync adapter buffers (e.g. the orthogonal
