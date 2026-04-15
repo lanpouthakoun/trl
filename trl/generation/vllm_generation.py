@@ -528,31 +528,49 @@ class VLLMGeneration:
                 elif fsdp_version == 2:
                     self._sync_fsdp2_params_to_vllm(model)
             else:
-                _sync_count = 0
-                _adapter_count = 0
-                for name, param in model.named_parameters():
-                    if not param.requires_grad:
-                        continue
-                    name = self._fix_param_name_to_vllm(name)
-                    if name is None:
-                        continue
-                    _sync_count += 1
-                    if "reft_adapter." in name or "parametrizations." in name:
-                        _adapter_count += 1
-                        if logger.isEnabledFor(logging.DEBUG) and any(f"layers.{i}." in name for i in (0, 12, 23)):
-                            flat = param.data.flatten()[:4].tolist()
-                            logger.debug(
-                                "[ReFT TRAIN params] %s  first4=%s  shape=%s dtype=%s",
-                                name, [f"{v:.6f}" for v in flat],
-                                list(param.shape), param.dtype,
-                            )
-                    with gather_if_zero3([param]):
-                        if self.mode == "server" and accelerator.is_main_process:
-                            self.vllm_client.update_named_param(name, param.data)
-                        elif self.mode == "colocate":
-                            llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                            llm_model.load_weights([(name, param.data)])
-                logger.debug("SYNC TOTAL: %d params (%d adapter)", _sync_count, _adapter_count)
+                _unwrapped = getattr(self.model, "module", self.model)
+                _is_reft = getattr(_unwrapped, "_intervention_config", None) is not None
+                if _is_reft and self.mode == "colocate":
+                    # ReFT colocate: use collective_rpc for robust weight sync
+                    # instead of the fragile internal attribute chain.
+                    weight_dict: dict[int, dict[str, torch.Tensor]] = {}
+                    for idx, layer in enumerate(_unwrapped.model.layers):
+                        adapter = getattr(layer, "adapter", None)
+                        if adapter is None:
+                            continue
+                        sd = {k: v.data.contiguous()
+                              for k, v in adapter.state_dict().items()}
+                        weight_dict[idx] = sd
+                    if weight_dict:
+                        self.llm.collective_rpc(
+                            "sync_reft_weights", args=(weight_dict, False))
+                    logger.debug("SYNC TOTAL: %d adapter layers via collective_rpc", len(weight_dict))
+                else:
+                    _sync_count = 0
+                    _adapter_count = 0
+                    for name, param in model.named_parameters():
+                        if not param.requires_grad:
+                            continue
+                        name = self._fix_param_name_to_vllm(name)
+                        if name is None:
+                            continue
+                        _sync_count += 1
+                        if "reft_adapter." in name or "parametrizations." in name:
+                            _adapter_count += 1
+                            if logger.isEnabledFor(logging.DEBUG) and any(f"layers.{i}." in name for i in (0, 12, 23)):
+                                flat = param.data.flatten()[:4].tolist()
+                                logger.debug(
+                                    "[ReFT TRAIN params] %s  first4=%s  shape=%s dtype=%s",
+                                    name, [f"{v:.6f}" for v in flat],
+                                    list(param.shape), param.dtype,
+                                )
+                        with gather_if_zero3([param]):
+                            if self.mode == "server" and accelerator.is_main_process:
+                                self.vllm_client.update_named_param(name, param.data)
+                            elif self.mode == "colocate":
+                                llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                                llm_model.load_weights([(name, param.data)])
+                    logger.debug("SYNC TOTAL: %d params (%d adapter)", _sync_count, _adapter_count)
 
         # In server mode, sync adapter buffers (e.g. the orthogonal
         # parametrization's ``base`` buffer).  named_parameters() only returns
