@@ -354,6 +354,23 @@ class ScriptArguments:
             "weights can be synced via the standard update_named_param path."
         },
     )
+    enable_lora: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, allocate LoRA buffers in vLLM at startup so a PEFT adapter can be applied via "
+            "LoRARequest. Mirrors --enable-lora on vLLM's native server. PEFT adapter weights are pushed "
+            "through the standard update_named_param path (they live in the model's state_dict alongside "
+            "the base weights)."
+        },
+    )
+    max_lora_rank: int = field(
+        default=16,
+        metadata={"help": "Max LoRA rank when --enable_lora is set."},
+    )
+    max_loras: int = field(
+        default=1,
+        metadata={"help": "Max number of LoRA adapters that can be active concurrently."},
+    )
 
 
 def _setup_reft_spec(model_name: str, reft_config_path: str) -> bool:
@@ -442,6 +459,9 @@ def llm_worker(
         worker_extension_cls="trl.scripts.vllm_serve.WeightSyncWorkerExtension",
         trust_remote_code=script_args.trust_remote_code,
         model_impl=script_args.vllm_model_impl,
+        enable_lora=script_args.enable_lora,
+        max_lora_rank=script_args.max_lora_rank,
+        max_loras=script_args.max_loras,
         # Important so temperature scaling/logit tweaking affects the TIS log probs
         logprobs_mode="processed_logprobs",
     )
