@@ -732,6 +732,7 @@ class GRPOTrainer(_BaseTrainer):
         if self.use_vllm:
             # Initialize vLLM generation backend
             self.on_before_vllm_generation_init()
+            extra_vllm_kwargs = self.get_extra_vllm_kwargs()
             self.vllm_generation = VLLMGeneration(
                 model=self.model,
                 accelerator=self.accelerator,
@@ -764,6 +765,8 @@ class GRPOTrainer(_BaseTrainer):
                 max_completion_length=self.max_completion_length,
                 logprobs=0,  # we only need the generated token logprobs for the importance sampling correction
                 generation_kwargs=args.generation_kwargs,
+                # Extra kwargs from hooks (e.g. enable_lora for prefill-only LoRA)
+                extra_llm_kwargs=extra_vllm_kwargs,
             )
             self._last_loaded_step = -1  # tag to avoid useless loading during grad accumulation
             self.on_after_vllm_generation_init()
@@ -1064,6 +1067,10 @@ class GRPOTrainer(_BaseTrainer):
     def on_after_vllm_generation_init(self):
         """Called immediately after VLLMGeneration is constructed."""
         pass
+
+    def get_extra_vllm_kwargs(self) -> dict:
+        """Return extra kwargs to forward to the LLM() constructor."""
+        return {}
 
     def sync_model_to_generation_backend(self):
         """Sync model weights to the vLLM generation backend."""

@@ -245,11 +245,15 @@ class VLLMGeneration:
         max_completion_length: int = 16,
         logprobs: int | None = 0,
         generation_kwargs: dict | None = None,
+        # Extra kwargs forwarded to the LLM() constructor (e.g. enable_lora)
+        extra_llm_kwargs: dict | None = None,
     ):
         self.model = model
         self.accelerator = accelerator
         self.is_fsdp_enabled = is_fsdp_enabled
         self.processing_class = processing_class
+        self.extra_llm_kwargs = extra_llm_kwargs or {}
+        self._lora_request = None  # set by hooks for prefill-only LoRA
 
         # vLLM configuration
         self.mode = mode
@@ -340,7 +344,7 @@ class VLLMGeneration:
                         raise ValueError("vLLM does not support in-flight 8-bit quantization.")
 
             # Build LLM initialization kwargs
-            self.llm = LLM(
+            llm_kwargs = dict(
                 model=model.name_or_path,
                 tensor_parallel_size=self.tensor_parallel_size,
                 gpu_memory_utilization=self.gpu_memory_utilization,
@@ -357,6 +361,8 @@ class VLLMGeneration:
                 logprobs_mode="processed_logprobs",
                 quantization=quantization,
             )
+            llm_kwargs.update(self.extra_llm_kwargs)
+            self.llm = LLM(**llm_kwargs)
             if self.enable_sleep_mode:
                 self.llm.sleep(level=2)
         else:
@@ -776,7 +782,10 @@ class VLLMGeneration:
                 vllm_prompts = [{"prompt_token_ids": ids} for ids in all_prompts]
 
             with profiler:
-                all_outputs = self.llm.generate(vllm_prompts, sampling_params=sampling_params, use_tqdm=False)
+                all_outputs = self.llm.generate(
+                    vllm_prompts, sampling_params=sampling_params,
+                    lora_request=self._lora_request, use_tqdm=False,
+                )
 
             all_prompt_ids = [output.prompt_token_ids for output in all_outputs]
             all_completion_ids = [output.token_ids for outputs in all_outputs for output in outputs.outputs]
