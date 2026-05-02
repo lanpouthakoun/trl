@@ -511,6 +511,43 @@ class VLLMClient:
             self.communicator.broadcast(weights, src=self.rank)
             self.communicator.group.barrier()
 
+    def sync_lora_weights(
+        self,
+        state_dict_path: str,
+        peft_config_dict: dict,
+        lora_int_id: int = 1,
+    ):
+        """
+        Apply a PEFT LoRA adapter on the vLLM server without merging into
+        base weights. Trainer rank 0 must write the adapter state-dict to
+        ``state_dict_path`` (a node-local safetensors file) before calling
+        this method.
+
+        Mirrors the colocate ``collective_rpc("sync_lora_weights", ...)``
+        path — server-side worker loads the file and applies via the
+        in-memory ``sync_lora_weights`` worker method.
+
+        Args:
+            state_dict_path (`str`):
+                Path to a safetensors file with the PEFT adapter state-dict.
+            peft_config_dict (`dict`):
+                Serialized PEFT config (``r``, ``lora_alpha``,
+                ``target_modules``, ``bias``).
+            lora_int_id (`int`):
+                Integer slot ID to load the adapter into.
+        """
+        url = f"{self.base_url}/sync_lora_weights/"
+        response = self.session.post(
+            url,
+            json={
+                "state_dict_path": state_dict_path,
+                "peft_config_dict": peft_config_dict,
+                "lora_int_id": lora_int_id,
+            },
+        )
+        if response.status_code != 200:
+            raise Exception(f"Request failed: {response.status_code}, {response.text}")
+
     def update_model_params(self, model: nn.Module):
         """
         Updates all parameters of the given model by calling `update_named_param` for each parameter in the model.

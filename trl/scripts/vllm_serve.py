@@ -187,6 +187,30 @@ class WeightSyncWorkerExtension:
         else:
             self.model_runner.model.load_weights(weights=[(name, weight)])
 
+    def sync_lora_weights_from_path(
+        self,
+        state_dict_path: str,
+        peft_config_dict: dict,
+        lora_int_id: int,
+    ) -> None:
+        """Server-mode counterpart to the colocate ``sync_lora_weights`` path.
+
+        Loads a PEFT LoRA state-dict from the given safetensors path on the
+        worker's local filesystem and forwards to the in-memory
+        ``sync_lora_weights`` worker method (provided by vLLM fork). Mirrors
+        the architectural pattern of ``/refresh_reft_caches/`` — HTTP request
+        → ``collective_rpc`` → worker-side method.
+
+        The path-based handoff avoids serializing tensors over HTTP. Trainer
+        rank 0 writes the safetensors file before triggering the RPC; workers
+        on the same node read it back. Caller is responsible for cleanup.
+        """
+        from safetensors.torch import load_file
+        state_dict = load_file(state_dict_path, device=str(self.device))
+        # Forward to the underlying worker method that knows how to apply the
+        # adapter to vLLM's LoRA buffers (lives in vllm.worker.worker_base).
+        self.sync_lora_weights(state_dict, peft_config_dict, lora_int_id)
+
     def close_communicator(self) -> None:
         """
         Closes the communicator when weight synchronization is no longer needed.
@@ -1001,6 +1025,33 @@ def main(script_args: ScriptArguments):
         # so the caller knows caches are up-to-date before generating.
         all_outputs = [connection.recv() for connection in connections]
         return {"message": "ReFT caches refreshed"}
+
+    class SyncLoraWeightsRequest(BaseModel):
+        state_dict_path: str
+        peft_config_dict: dict
+        lora_int_id: int = 1
+
+    @app.post("/sync_lora_weights/")
+    async def sync_lora_weights(request: SyncLoraWeightsRequest):
+        """
+        Apply a PEFT LoRA adapter to vLLM's LoRA buffers without merging into
+        base weights. Trainer rank 0 writes the adapter state-dict to
+        ``state_dict_path`` (a node-local safetensors file) before calling
+        this endpoint; workers load and apply the adapter through the
+        existing in-memory ``sync_lora_weights`` worker method.
+
+        Used by prefill-only LoRA (and any other LoRA flow that needs the
+        adapter to remain a separate adapter at inference time, applied via
+        ``LoRARequest``).
+        """
+        kwargs = {
+            "method": "sync_lora_weights_from_path",
+            "args": (request.state_dict_path, request.peft_config_dict, request.lora_int_id),
+        }
+        for connection in connections:
+            connection.send({"type": "call", "method": "collective_rpc", "kwargs": kwargs})
+        all_outputs = [connection.recv() for connection in connections]
+        return {"message": "LoRA adapter synced"}
 
     @app.post("/get_reft_weight_fingerprints/")
     async def get_reft_weight_fingerprints():
