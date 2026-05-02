@@ -215,6 +215,7 @@ class VLLMClient:
         logprobs: int | None = 0,
         structured_outputs_regex: str | None = None,
         generation_kwargs: dict | None = None,
+        lora_request: "LoRARequest | None" = None,
     ) -> dict[str, list[list[int]]]:
         """
         Generates model completions for the provided prompts.
@@ -271,6 +272,18 @@ class VLLMClient:
                 [pil_to_base64(img) for img in img_list] if img_list is not None else None for img_list in images
             ]
 
+        # Serialize lora_request to a dict for the wire. The server reconstructs
+        # a LoRARequest from this and passes it to vLLM. Only the fields the
+        # forked vLLM uses at inference time are sent.
+        lora_request_payload = None
+        if lora_request is not None:
+            lora_request_payload = {
+                "lora_name": lora_request.lora_name,
+                "lora_int_id": lora_request.lora_int_id,
+                "lora_path": lora_request.lora_path,
+                "lora_position": getattr(lora_request, "lora_position", "all"),
+            }
+
         response = self.session.post(
             url,
             json={
@@ -286,6 +299,7 @@ class VLLMClient:
                 "logprobs": logprobs,
                 "structured_outputs_regex": structured_outputs_regex,
                 "generation_kwargs": generation_kwargs or {},
+                "lora_request": lora_request_payload,
             },
         )
         if response.status_code == 200:

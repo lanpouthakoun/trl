@@ -655,6 +655,9 @@ def main(script_args: ScriptArguments):
         logprobs: int | None = 0
         structured_outputs_regex: str | None = None
         generation_kwargs: dict = field(default_factory=dict)
+        # Optional LoRA adapter to apply at inference time. Reconstructed
+        # into a LoRARequest on the server side and forwarded to vLLM.
+        lora_request: dict | None = None
 
     class GenerateResponse(BaseModel):
         prompt_ids: list[list[int]]
@@ -762,6 +765,19 @@ def main(script_args: ScriptArguments):
         # Evenly distribute prompts across DP ranks
         chunked_prompts = chunk_list(prompts, script_args.data_parallel_size)
 
+        # Reconstruct LoRARequest from the optional dict the client sent.
+        # Forked vLLM's LoRARequest accepts lora_position; pass through if present.
+        lora_request_obj = None
+        if request.lora_request is not None:
+            from vllm.lora.request import LoRARequest as _LoRARequest
+            _lr = request.lora_request
+            lora_request_obj = _LoRARequest(
+                lora_name=_lr["lora_name"],
+                lora_int_id=_lr["lora_int_id"],
+                lora_path=_lr["lora_path"],
+                lora_position=_lr.get("lora_position", "all"),
+            )
+
         # Send the prompts to each worker
         for connection, prompts in zip(connections, chunked_prompts, strict=True):
             # When the number of prompts is less than data_parallel_size, some workers will receive empty prompts.
@@ -770,6 +786,8 @@ def main(script_args: ScriptArguments):
             if not prompts:
                 prompts = ["<placeholder>"]
             kwargs = {"prompts": prompts, "sampling_params": sampling_params}
+            if lora_request_obj is not None:
+                kwargs["lora_request"] = lora_request_obj
             connection.send({"type": "call", "method": "generate", "kwargs": kwargs})
 
         # Receive results

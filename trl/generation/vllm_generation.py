@@ -694,6 +694,7 @@ class VLLMGeneration:
                     output = self.vllm_client.generate(
                         prompts=ordered_set_of_prompt_ids,
                         images=ordered_set_of_images,
+                        lora_request=self._lora_request,
                         **sampling_params,
                     )
                     payload = (
